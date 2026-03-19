@@ -16,6 +16,7 @@ from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
 from backend.core.agents.agent_base import AgentMetadata
 from backend.core.agents.specialists import DocsAgent, K8sAgent
 from backend.core.agents.metrics_agent import MetricsAgent
+from pydantic_ai import RunContext
 
 
 class NexusOpsOutput(BaseModel):
@@ -61,18 +62,18 @@ Always provide actionable recommendations with your analysis.""",
     def _register_delegations(self):
         """Register delegation tools for each specialist agent."""
 
-        async def ask_docs(query: str) -> str:
+        async def ask_docs(ctx: RunContext[Any], query: str, **kwargs) -> str:
             """Query the documentation and runbook agent for troubleshooting guides and past incidents."""
             from backend.core.agents.specialists import DocsAgentContext
             result = await self.docs_agent.run(query, context=DocsAgentContext(query=query))
             return str(result.output)
 
-        async def ask_k8s(query: str) -> str:
+        async def ask_k8s(ctx: RunContext[Any], query: str, **kwargs) -> str:
             """Query the Kubernetes agent for pod status, events, and cluster state."""
             result = await self.k8s_agent.run(query)
             return str(result.output)
 
-        async def ask_metrics(query: str) -> str:
+        async def ask_metrics(ctx: RunContext[Any], query: str, **kwargs) -> str:
             """Query the Metrics agent for Prometheus data — CPU, memory, latency, error rates."""
             result = await self.metrics_agent.run(query)
             return str(result.output)

@@ -12,6 +12,7 @@ from pydantic_ai import Agent, RunContext, models
 from backend.core.memory.message_base import UniversalMessage, MessageHistoryBase
 from backend.core.agents.agent_base import AgentBase, AgentMetadata, AgentResult, ToolConfig
 import datetime
+import functools
 
 logger = logging.getLogger("nexusops.agent")
 
@@ -28,17 +29,11 @@ class PydanticAIAgent(AgentBase):
         config = super().add_tool(tool, name, enabled, use_cache, return_to_caller)
 
         # Wrap tool to check enabled flag at runtime
-        async def _tool_wrapper(ctx: RunContext[Any], *args, **kwargs):
+        @functools.wraps(tool)
+        async def _tool_wrapper(*args, **kwargs):
             if not self.tools[config.name].enabled:
                 raise RuntimeError(f"Tool {config.name} is currently disabled.")
-            import inspect
-            sig = inspect.signature(tool)
-            if list(sig.parameters.values())[0].annotation == RunContext[Any] or 'ctx' in sig.parameters:
-                return await tool(ctx, *args, **kwargs) if inspect.iscoroutinefunction(tool) else tool(ctx, *args, **kwargs)
             return await tool(*args, **kwargs) if inspect.iscoroutinefunction(tool) else tool(*args, **kwargs)
-
-        _tool_wrapper.__name__ = config.name
-        _tool_wrapper.__doc__ = tool.__doc__
 
         if return_to_caller:
             self._pydantic_agent.tool(name=config.name)(_tool_wrapper)

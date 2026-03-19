@@ -3,7 +3,9 @@ from pydantic import BaseModel, Field
 from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
 from backend.core.agents.agent_base import AgentMetadata
 from backend.core.utils.rag_utils import DocumentRetriever, RetrieverConfig
+from backend.core.utils.rag_utils import DocumentRetriever, RetrieverConfig
 import json
+from pydantic_ai import RunContext
 
 class DocsAgentOutput(BaseModel):
     answer: str = Field(description="The comprehensive answer based on retrieved documents")
@@ -26,7 +28,7 @@ class DocsAgent(PydanticAIAgent):
         self._register_tools()
 
     def _register_tools(self):
-        async def search_runbooks(ctx, query: str) -> str:
+        async def search_runbooks(ctx: RunContext[Any], query: str, **kwargs) -> str:
             """Search for relevant runbooks or incident post-mortems."""
             docs = self.retriever.retrieve(query)
             if not docs:
@@ -51,11 +53,11 @@ class K8sAgent(PydanticAIAgent):
         self._register_tools()
 
     def _register_tools(self):
-        async def get_pods(ctx, namespace: str = "default") -> str:
+        async def get_pods(ctx: RunContext[Any], namespace: str = "default", **kwargs) -> str:
             """Get pods in a namespace (simulated)."""
             return f"Simulated pods in {namespace}: payment-service-5b4d7-xyz (CrashLoopBackOff), auth-service-99x-abc (Running)"
             
-        async def get_events(ctx, namespace: str = "default") -> str:
+        async def get_events(ctx: RunContext[Any], namespace: str = "default", **kwargs) -> str:
             """Get recent K8s events (simulated)."""
             return f"Simulated events in {namespace}: Warning FailedScheduling payment-service Insufficient memory"
             

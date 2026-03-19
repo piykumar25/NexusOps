@@ -17,8 +17,10 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
 from backend.core.agents.agent_base import AgentMetadata
+from backend.core.agents.agent_base import AgentMetadata
 import random
 import json
+from pydantic_ai import RunContext
 
 
 class MetricDataPoint(BaseModel):
@@ -61,7 +63,7 @@ When given a service name and an incident description, you should:
 
     def _register_tools(self):
 
-        async def query_prometheus(ctx, promql: str, service: str = "unknown") -> str:
+        async def query_prometheus(ctx: RunContext[Any], promql: str, service: str = "unknown", **kwargs) -> str:
             """
             Execute a PromQL query against Prometheus and return the results.
             Args:
@@ -126,7 +128,7 @@ When given a service name and an incident description, you should:
 
             return json.dumps(result, indent=2)
 
-        async def get_service_health_summary(ctx, service: str) -> str:
+        async def get_service_health_summary(ctx: RunContext[Any], service: str, **kwargs) -> str:
             """
             Get a comprehensive health snapshot of a service across all key metrics.
             Args:
