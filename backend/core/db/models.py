@@ -3,7 +3,7 @@ from backend.core.db.database import Base
 from datetime import datetime
 
 class ConversationSession(Base):
-    __tablename__ = "taara_conversation_details"
+    __tablename__ = "nexusops_conversations"
     
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(String, unique=True, index=True, nullable=False)

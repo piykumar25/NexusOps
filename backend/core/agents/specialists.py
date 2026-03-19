@@ -17,7 +17,7 @@ class DocsAgent(PydanticAIAgent):
         metadata = AgentMetadata(name="DocsAgent", description="Searches runbooks and incident documentation to answer operations questions.")
         super().__init__(
             metadata=metadata,
-            system_prompt="You are an expert DevOps engineer answering questions based ONLY on the provided runbooks. Site your sources.",
+            system_prompt="You are an expert DevOps engineer answering questions based ONLY on the provided runbooks. Cite your sources.",
             output_type=DocsAgentOutput,
             model_name=model_name,
             deps_type=DocsAgentContext
