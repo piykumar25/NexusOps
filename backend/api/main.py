@@ -28,6 +28,7 @@ from backend.core.memory.conversation_service import ConversationService
 from backend.core.db.database import get_db
 from backend.core.events.kafka_infra import KafkaConfig, NexusKafkaProducer, ensure_topics_exist
 from backend.api.webhooks.ingester import router as webhook_router, init_webhook_producer
+from backend.api.routers.websocket_router import router as ws_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("nexusops.api")
@@ -95,6 +96,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(webhook_router)
+app.include_router(ws_router)
 
 
 # ─── Chat Endpoint ───────────────────────────────────────────────────────────
