@@ -22,17 +22,18 @@ Protocol:
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from backend.core.agents.coordinator import MasterCoordinator
-
 logger = logging.getLogger("nexusops.websocket")
 
 router = APIRouter()
+
+LLM_MODEL = os.environ.get("LLM_MODEL_NAME", "test")
 
 
 class ConnectionManager:
@@ -77,10 +78,16 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def _stream_agent_response(websocket: WebSocket, session_id: str, message: str, model_name: str = "test"):
+def _is_real_llm_configured() -> bool:
+    """Check if a real LLM (not the test model) is configured."""
+    return LLM_MODEL not in ("test", "test:fake", "")
+
+
+async def _stream_agent_response(websocket: WebSocket, session_id: str, message: str):
     """
     Execute the MasterCoordinator and stream progress updates back to the client.
-    Simulates token-by-token streaming for the MVP.
+    Uses the singleton coordinator from main.py when a real LLM is configured.
+    Falls back to intelligent mock responses in demo mode.
     """
     try:
         # Signal: thinking started
@@ -90,25 +97,50 @@ async def _stream_agent_response(websocket: WebSocket, session_id: str, message:
             "done": False,
         })
 
-        coordinator = MasterCoordinator(model_name=model_name, qdrant_url="http://localhost:6333")
+        if _is_real_llm_configured():
+            # ── Real LLM Mode ──
+            from backend.api.main import get_coordinator
+            coordinator = get_coordinator()
 
-        # Signal: which tools are available
-        await websocket.send_json({
-            "type": "tool_call",
-            "tool": "MasterCoordinator",
-            "status": "delegating",
-            "available_tools": list(coordinator.tools.keys()),
-        })
+            # Signal tool delegation
+            for tool_name in coordinator.tools.keys():
+                await websocket.send_json({
+                    "type": "tool_call",
+                    "tool": tool_name,
+                    "status": "running",
+                })
+                await asyncio.sleep(0.2)
 
-        # Execute the coordinator
-        try:
             result = await coordinator.run(input_data=message)
             response_text = str(result.output)
-        except Exception as e:
-            # If no LLM is configured, generate a mock response
+
+            # Signal tool completion
+            for tool_name in coordinator.tools.keys():
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "result": "complete",
+                })
+        else:
+            # ── Demo Mode (no real LLM) ──
+            # Simulate realistic tool execution stages
+            demo_tools = ["ask_docs_agent", "ask_k8s_agent", "ask_metrics_agent"]
+            for tool_name in demo_tools:
+                await websocket.send_json({
+                    "type": "tool_call",
+                    "tool": tool_name,
+                    "status": "running",
+                })
+                await asyncio.sleep(0.6)  # Simulate agent execution time
+                await websocket.send_json({
+                    "type": "tool_result",
+                    "tool": tool_name,
+                    "result": "complete",
+                })
+
             response_text = _generate_mock_response(message)
 
-        # Simulate token-by-token streaming
+        # Stream response token-by-token
         words = response_text.split(" ")
         for i, word in enumerate(words):
             token = word + " "
@@ -139,25 +171,32 @@ def _generate_mock_response(message: str) -> str:
     """Generate a realistic mock response for demo mode (no LLM configured)."""
     msg_lower = message.lower()
 
-    if "crash" in msg_lower or "restart" in msg_lower or "pod" in msg_lower:
+    if "crash" in msg_lower or "restart" in msg_lower or "pod" in msg_lower or "payment" in msg_lower:
         return (
             "🔍 **Investigation Summary: Pod CrashLoopBackOff**\n\n"
             "I analyzed the payment-service pods across 3 specialist agents:\n\n"
+            "---\n\n"
             "**📊 MetricsAgent Findings:**\n"
-            "- CPU utilization spiked to 94% at 15:10 UTC\n"
-            "- Memory usage at 98% of pod limit (1024Mi)\n"
-            "- 5xx error rate jumped from 1.2% → 34.5%\n\n"
+            "- CPU utilization spiked to **94%** at 15:10 UTC\n"
+            "- Memory usage at **98%** of pod limit (1024Mi)\n"
+            "- 5xx error rate jumped from 1.2% → **34.5%**\n"
+            "- P99 latency degraded from 120ms → **2.8s**\n\n"
             "**🔧 K8sAgent Findings:**\n"
-            "- Pod `payment-service-5b4d7-xyz` in CrashLoopBackOff\n"
-            "- 7 restarts in the last hour\n"
-            "- Event: `FailedScheduling - Insufficient memory`\n\n"
+            "- Pod `payment-service-5b4d7-xyz` — **CrashLoopBackOff**\n"
+            "- Pod `auth-service-99x-abc` — Running ✅\n"
+            "- **7 restarts** in the last hour\n"
+            "- Event: `FailedScheduling — Insufficient memory`\n\n"
             "**📚 DocsAgent Findings:**\n"
-            "- Runbook `RB-0042` matches: 'Memory leak in payment-service after v2.3 deployment'\n"
-            "- Previous incident `INC-1847` had identical symptoms\n\n"
-            "**🎯 Root Cause:** The deployment at 14:45 UTC (v2.3.1) introduced a memory leak in the "
-            "connection pool handler. Under normal traffic load, memory consumption grows linearly until OOM kill.\n\n"
+            "- Runbook `RB-0042` matches: *'Memory leak in payment-service after v2.3 deployment'*\n"
+            "- Previous incident `INC-1847` had identical symptoms\n"
+            "- Resolution time was 23 minutes via rollback\n\n"
+            "---\n\n"
+            "**🎯 Root Cause Hypothesis:**\n"
+            "The deployment at 14:45 UTC (v2.3.1) introduced a memory leak in the "
+            "connection pool handler. Under normal traffic load (~800 rps), memory consumption "
+            "grows linearly until the pod hits its 1024Mi limit and gets OOM-killed.\n\n"
             "**⚡ Recommended Actions:**\n"
-            "1. **IMMEDIATE:** Rollback to v2.3.0\n"
+            "1. **IMMEDIATE:** Rollback to v2.3.0 → `kubectl rollout undo deployment/payment-service`\n"
             "2. **MITIGATE:** Increase memory limit to 2Gi temporarily\n"
             "3. **INVESTIGATE:** Review PR #847 for connection pool changes\n"
             "4. **PREVENT:** Add memory profiling to CI pipeline"
@@ -166,26 +205,67 @@ def _generate_mock_response(message: str) -> str:
     elif "latency" in msg_lower or "slow" in msg_lower:
         return (
             "🔍 **Investigation Summary: Latency Degradation**\n\n"
-            "I detected elevated P99 latency across the auth-service:\n\n"
-            "**📊 Metrics:** P99 latency went from 120ms → 3.2s starting 14:50 UTC\n"
-            "**🔧 K8s:** All 3 pods are running but show increased CPU wait time\n"
-            "**📚 Docs:** Runbook suggests checking database connection pool saturation\n\n"
+            "Elevated P99 latency detected across the auth-service:\n\n"
+            "---\n\n"
+            "**📊 Metrics:** P99 latency went from 120ms → **3.2s** starting 14:50 UTC\n"
+            "**🔧 K8s:** All 3 pods running, but showing increased CPU wait time\n"
+            "**📚 Docs:** Runbook `RB-0019` matches — *'Database connection pool saturation'*\n\n"
+            "---\n\n"
             "**🎯 Root Cause:** Database connection pool is saturated. "
-            "Query `SELECT * FROM sessions` is doing a full table scan after the index was dropped in migration v45.\n\n"
-            "**⚡ Actions:** 1. Add index back on `sessions.user_id` 2. Increase pool size from 10→25"
+            "Query `SELECT * FROM sessions` is doing a full table scan after "
+            "the index was dropped in migration v45.\n\n"
+            "**⚡ Actions:**\n"
+            "1. Add index back: `CREATE INDEX idx_sessions_user_id ON sessions(user_id)`\n"
+            "2. Increase pool size from 10 → 25\n"
+            "3. Add query timeout of 5s to prevent cascade failures"
+        )
+
+    elif "memory" in msg_lower or "oom" in msg_lower or "leak" in msg_lower:
+        return (
+            "🔍 **Investigation Summary: Memory Pressure**\n\n"
+            "High memory usage detected across multiple services:\n\n"
+            "---\n\n"
+            "**📊 MetricsAgent:** Memory utilization at **96%** (982Mi / 1024Mi)\n"
+            "**🔧 K8sAgent:** 2 OOMKilled events in the last 30 minutes\n"
+            "**📚 DocsAgent:** Runbook `RB-0042` — *'Memory leak triage procedure'*\n\n"
+            "---\n\n"
+            "**🎯 Root Cause:** Heap analysis shows unbounded cache growth in the "
+            "session store. The TTL eviction policy was accidentally disabled in config v2.3.\n\n"
+            "**⚡ Actions:**\n"
+            "1. Re-enable cache TTL: `session.cache.ttl_seconds=300`\n"
+            "2. Trigger manual GC: `kubectl exec -it <pod> -- jcmd 1 GC.run`\n"
+            "3. Set memory request/limit ratio to 1:1 to prevent overcommit"
+        )
+
+    elif "deploy" in msg_lower or "rollback" in msg_lower:
+        return (
+            "🔍 **Deployment Analysis**\n\n"
+            "Analyzing recent deployment activity:\n\n"
+            "---\n\n"
+            "**📊 Metrics:** Error rates stable post-deploy ✅\n"
+            "**🔧 K8s:** Rolling update completed successfully, all replicas healthy\n"
+            "**📚 Docs:** Deployment runbook `RB-0001` followed correctly\n\n"
+            "---\n\n"
+            "**Status:** The last deployment appears healthy. No anomalies detected.\n\n"
+            "If you need a rollback, run:\n"
+            "```\nkubectl rollout undo deployment/<service-name> -n production\n```"
         )
 
     else:
         return (
             "🔍 **NexusOps Analysis**\n\n"
-            f"I received your query: *\"{message}\"*\n\n"
-            "I've consulted 3 specialist agents:\n"
-            "- **DocsAgent:** Searched runbooks and incident history\n"
-            "- **MetricsAgent:** Checked Prometheus for relevant metrics\n"
-            "- **K8sAgent:** Inspected cluster state\n\n"
-            "All systems appear to be operating within normal parameters. "
-            "No anomalies were detected in the last 30 minutes.\n\n"
-            "Would you like me to dig deeper into a specific service or metric?"
+            f"I consulted 3 specialist agents for your query: *\"{message}\"*\n\n"
+            "---\n\n"
+            "**📚 DocsAgent:** Searched runbooks and incident history — no direct matches\n"
+            "**📊 MetricsAgent:** All monitored services within normal parameters\n"
+            "**🔧 K8sAgent:** Cluster state healthy, all pods running\n\n"
+            "---\n\n"
+            "No anomalies detected in the last 30 minutes. "
+            "All services are operating within their SLO thresholds.\n\n"
+            "💡 *Try asking about a specific service, like:*\n"
+            "- *\"Why is the payment-service crashing?\"*\n"
+            "- *\"Show me latency trends for auth-service\"*\n"
+            "- *\"What happened during incident INC-1847?\"*"
         )
 
 
