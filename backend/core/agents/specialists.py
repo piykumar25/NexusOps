@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field
 from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
 from backend.core.agents.agent_base import AgentMetadata
 from backend.core.utils.rag_utils import DocumentRetriever, RetrieverConfig
-from backend.core.utils.rag_utils import DocumentRetriever, RetrieverConfig
 import json
 from pydantic_ai import RunContext
 

@@ -3,16 +3,20 @@ NexusOps PydanticAI Agent Wrapper
 ===================================
 Wraps the pydantic-ai Agent class to conform to the AgentBase contract.
 Provides tool registration, conversation history bridging, and error handling.
+
+Compatible with pydantic-ai >= 1.70.0
 """
 
 from typing import Any, Callable, Dict, List, Optional
 import logging
+import inspect
+import functools
+import datetime
+
 import pydantic_ai
 from pydantic_ai import Agent, RunContext, models
 from backend.core.memory.message_base import UniversalMessage, MessageHistoryBase
 from backend.core.agents.agent_base import AgentBase, AgentMetadata, AgentResult, ToolConfig
-import datetime
-import functools
 
 logger = logging.getLogger("nexusops.agent")
 
@@ -43,6 +47,51 @@ class PydanticAIAgent(AgentBase):
 
         return config
 
+    @staticmethod
+    def _extract_result_data(result: Any) -> Any:
+        """
+        Extract the output data from an AgentRunResult.
+        Handles API differences across pydantic-ai versions.
+        """
+        # pydantic-ai >= 1.70: .output  (preferred)
+        if hasattr(result, 'output'):
+            return result.output
+        # pydantic-ai < 1.0: .data
+        if hasattr(result, 'data'):
+            return result.data
+        # Fallback: .response
+        if hasattr(result, 'response'):
+            return result.response
+        return str(result)
+
+    @staticmethod
+    def _extract_usage(result: Any) -> dict:
+        """Extract usage info, handling both property and method forms."""
+        try:
+            usage = result.usage
+            if callable(usage):
+                usage = usage()
+            if usage is None:
+                return {}
+            if hasattr(usage, 'model_dump'):
+                return {"usage": usage.model_dump()}
+            if hasattr(usage, 'dict'):
+                return {"usage": usage.dict()}
+            return {"usage": str(usage)}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_new_messages(result: Any) -> list:
+        """Extract new messages, handling both property and method forms."""
+        try:
+            msgs = result.new_messages
+            if callable(msgs):
+                msgs = msgs()
+            return list(msgs) if msgs else []
+        except Exception:
+            return []
+
     async def run(self, input_data: Any, message_history: Optional[MessageHistoryBase] = None, context: Any = None) -> AgentResult:
         """Execute the agent with full error handling and graceful degradation."""
         try:
@@ -56,29 +105,29 @@ class PydanticAIAgent(AgentBase):
                 message_history=framework_messages,
             )
 
+            # Extract data using version-safe helpers
+            output_data = self._extract_result_data(result)
+            usage_data = self._extract_usage(result)
+
             # Map back to UniversalMessages
             new_messages = []
             try:
-                for msg in result.new_messages():
+                raw_msgs = self._extract_new_messages(result)
+                for _ in raw_msgs:
                     new_messages.append(UniversalMessage.create(
                         role="assistant",
-                        content=str(result.data),
-                        metadata={"usage": result.usage().model_dump()} if result.usage() else {},
+                        content=str(output_data),
+                        metadata=usage_data,
                     ))
             except Exception:
-                # If message mapping fails, still return the result
-                new_messages = [UniversalMessage.create(role="assistant", content=str(result.data))]
+                new_messages = [UniversalMessage.create(role="assistant", content=str(output_data))]
 
-            usage_data = {}
-            try:
-                if result.usage():
-                    usage_data = {"usage": result.usage().model_dump()}
-            except Exception:
-                pass
+            if not new_messages:
+                new_messages = [UniversalMessage.create(role="assistant", content=str(output_data))]
 
             return AgentResult(
                 input_data=input_data,
-                output=result.data,
+                output=output_data,
                 new_messages=new_messages,
                 metadata=usage_data,
             )

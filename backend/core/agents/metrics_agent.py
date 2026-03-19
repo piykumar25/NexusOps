@@ -17,7 +17,6 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
 from backend.core.agents.agent_base import AgentMetadata
-from backend.core.agents.agent_base import AgentMetadata
 import random
 import json
 from pydantic_ai import RunContext
