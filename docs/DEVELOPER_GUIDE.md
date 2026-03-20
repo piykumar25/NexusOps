@@ -77,16 +77,35 @@ npm run dev
 
 ---
 
-## Environment Variables
+## Environment Variables & Multi-Tenancy (Tier 3)
 
-| Variable | Default | Description |
+The application utilizes strict Pydantic validation via `NexusOpsSettings`. Deployment variables are managed exclusively via the `.env` file instead of inline scripts.
+
+| Variable | Default (Local) | Description |
 |----------|---------|-------------|
-| `LLM_MODEL_NAME` | `test` | AI model identifier. Use `test` for demo mode, `ollama:llama3.2:3b` for real AI |
-| `OLLAMA_BASE_URL` | *(required for Ollama)* | Must be `http://localhost:11434/v1` |
+| `LLM_MODEL_NAME` | `test` | AI model identifier. Use `test` for demo mode bypass, `ollama:llama3.2:3b` for real AI orchestration |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Local deployment endpoint for Ollama backend |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9093` | Kafka broker address |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant vector database URL |
-| `PROMETHEUS_URL` | `http://localhost:9090` | Prometheus server URL |
-| `DATABASE_URL` | `postgresql://nexusops:...` | PostgreSQL connection string |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant vector database connection endpoint |
+| `PROMETHEUS_URL` | `http://localhost:9090` | Timeseries database URL |
+| `DATABASE_URL` | `postgresql://nexusops...` | PostgreSQL connection string |
+| `GUARDRAIL_ENABLE_INJECTION_FILTER` | `true` | Security toggle (Tier 1) |
+
+> Copy `.env.example` to `.env` immediately after repository clone to establish baseline connections.
+
+---
+
+## Managing Database Migrations (Tier 4)
+
+NexusOps persists Conversation histories using `SQLAlchemy`. All database schema iterations are tracked centrally:
+```powershell
+# Ensure DB is running
+docker compose up -d postgres
+
+# Execute all pending migrations
+alembic upgrade head
+```
+When altering `backend/core/db/models.py`, generate a new migration via `alembic revision --autogenerate -m "description"`.
 
 ---
 

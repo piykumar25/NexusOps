@@ -63,6 +63,17 @@ graph TB
 
 ---
 
+## 5-Tier Production Subsystems
+
+The backend incorporates five distinct architectural layers designed for SaaS viability:
+1. **Tier 1 (Guardrails & Resilience):** Managed by `core/utils/guardrails.py`, providing prompt injection filtering, topic restriction, token redaction, and a failover Circuit Breaker directly in the WebSocket router.
+2. **Tier 2 (Real Integrations):** Uses real standard clients (`kubernetes` cluster discovery, `httpx` for Prometheus REST, `qdrant-client` for RAG) safely wrapped in timeout boundaries.
+3. **Tier 3 (Multi-Tenant Config):** Strict enforcement of deployment variables via `NexusOpsSettings` containing database constraints and fallback routing for local LLMs (`OLLAMA_BASE_URL`).
+4. **Tier 4 (DB Persistence):** SQLAlchemy engines implementing exponential backoff logic per Docker cold-starts. Conversation JSON payloads are stored in PostgreSQL managed exclusively by `alembic` migrations (`alembic/versions`).
+5. **Tier 5 (Observability):** `RequestIdMiddleware` injects distributed traceability across layers, mapped simultaneously with local `prometheus` and `grafana` targets in `docker-compose.yml`.
+
+---
+
 ## Agent Architecture
 
 ### Agent Hierarchy

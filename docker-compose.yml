@@ -71,6 +71,32 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: nexusops-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - nexusops-prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+  grafana:
+    image: grafana/grafana:10.4.5
+    container_name: nexusops-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - nexusops-grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=nexusops_admin
+    depends_on:
+      - prometheus
+
 volumes:
   nexusops-pg-data:
   nexusops-redis-data:
+  nexusops-prometheus-data:
+  nexusops-grafana-data:

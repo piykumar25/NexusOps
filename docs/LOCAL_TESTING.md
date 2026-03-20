@@ -110,6 +110,9 @@ docker compose up -d      # Fresh start
 # Agent framework tests
 python -m pytest test_agent.py -v
 
+# Guardrails subsystem (Injection, Topic, Circuits)
+python -m pytest tests/test_guardrails.py -v
+
 # Phase 2 integration tests (Kafka, webhooks)
 python -m pytest test_phase2.py -v
 
