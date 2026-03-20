@@ -1,17 +1,22 @@
 """
 NexusOps PydanticAI Agent Wrapper
 ===================================
-Wraps the pydantic-ai Agent class to conform to the AgentBase contract.
-Provides tool registration, conversation history bridging, and error handling.
-
-Compatible with pydantic-ai >= 1.70.0
+Production-grade wrapper for the pydantic-ai Agent class.
+Provides:
+  - Tool registration with enable/disable at runtime
+  - Retry with exponential backoff for LLM calls
+  - Configurable per-agent timeout
+  - Version-safe result extraction (pydantic-ai >= 1.70.0)
+  - Structured error responses (never crashes the pipeline)
 """
 
 from typing import Any, Callable, Dict, List, Optional
+import asyncio
 import logging
 import inspect
 import functools
 import datetime
+import time
 
 import pydantic_ai
 from pydantic_ai import Agent, RunContext, models
@@ -22,8 +27,28 @@ logger = logging.getLogger("nexusops.agent")
 
 
 class PydanticAIAgent(AgentBase):
-    def __init__(self, metadata: AgentMetadata, system_prompt: str, output_type: Any, model_name: str, deps_type: Any = None):
+    """
+    Production-grade pydantic-ai agent with retry, timeout, and graceful degradation.
+    """
+
+    # Default retry and timeout settings (can be overridden per-agent)
+    DEFAULT_MAX_RETRIES: int = 3
+    DEFAULT_RETRY_BACKOFF: List[float] = [1.0, 2.0, 4.0]  # seconds
+    DEFAULT_TIMEOUT_SECONDS: float = 90.0
+
+    def __init__(
+        self,
+        metadata: AgentMetadata,
+        system_prompt: str,
+        output_type: Any,
+        model_name: str,
+        deps_type: Any = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ):
         super().__init__(metadata, output_type, deps_type)
+        self.max_retries = max_retries
+        self.timeout_seconds = timeout_seconds
         self._pydantic_agent = Agent(
             model=model_name,
             system_prompt=system_prompt,
@@ -32,7 +57,6 @@ class PydanticAIAgent(AgentBase):
     def add_tool(self, tool: Callable, name: Optional[str] = None, enabled: bool = True, use_cache: bool = False, return_to_caller: bool = True) -> ToolConfig:
         config = super().add_tool(tool, name, enabled, use_cache, return_to_caller)
 
-        # Wrap tool to check enabled flag at runtime
         @functools.wraps(tool)
         async def _tool_wrapper(*args, **kwargs):
             if not self.tools[config.name].enabled:
@@ -49,17 +73,11 @@ class PydanticAIAgent(AgentBase):
 
     @staticmethod
     def _extract_result_data(result: Any) -> Any:
-        """
-        Extract the output data from an AgentRunResult.
-        Handles API differences across pydantic-ai versions.
-        """
-        # pydantic-ai >= 1.70: .output  (preferred)
+        """Extract output data from AgentRunResult (version-safe)."""
         if hasattr(result, 'output'):
             return result.output
-        # pydantic-ai < 1.0: .data
         if hasattr(result, 'data'):
             return result.data
-        # Fallback: .response
         if hasattr(result, 'response'):
             return result.response
         return str(result)
@@ -92,22 +110,76 @@ class PydanticAIAgent(AgentBase):
         except Exception:
             return []
 
+    async def _run_with_retry(self, user_prompt: str, deps: Any, message_history: list) -> Any:
+        """
+        Execute the pydantic-ai agent with retry + exponential backoff.
+        Raises the last exception if all retries are exhausted.
+        """
+        last_exception = None
+        backoff_schedule = self.DEFAULT_RETRY_BACKOFF[:self.max_retries]
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                result = await asyncio.wait_for(
+                    self._pydantic_agent.run(
+                        user_prompt=user_prompt,
+                        deps=deps,
+                        message_history=message_history,
+                    ),
+                    timeout=self.timeout_seconds,
+                )
+                if attempt > 1:
+                    logger.info(f"Agent '{self.metadata.name}' succeeded on attempt {attempt}")
+                return result
+
+            except asyncio.TimeoutError:
+                last_exception = TimeoutError(
+                    f"Agent '{self.metadata.name}' timed out after {self.timeout_seconds}s"
+                )
+                logger.warning(
+                    f"Agent '{self.metadata.name}' timeout on attempt {attempt}/{self.max_retries} "
+                    f"({self.timeout_seconds}s)"
+                )
+            except Exception as e:
+                last_exception = e
+                logger.warning(
+                    f"Agent '{self.metadata.name}' failed on attempt {attempt}/{self.max_retries}: "
+                    f"{type(e).__name__}: {str(e)[:200]}"
+                )
+
+            # Backoff before next retry (skip on last attempt)
+            if attempt < self.max_retries:
+                backoff = backoff_schedule[attempt - 1] if attempt - 1 < len(backoff_schedule) else backoff_schedule[-1]
+                logger.info(f"Agent '{self.metadata.name}' retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
+
+        # All retries exhausted
+        raise last_exception
+
     async def run(self, input_data: Any, message_history: Optional[MessageHistoryBase] = None, context: Any = None) -> AgentResult:
-        """Execute the agent with full error handling and graceful degradation."""
+        """
+        Execute the agent with retry, timeout, and structured error handling.
+        Never raises — always returns an AgentResult (error results on failure).
+        """
+        start_time = time.time()
+
         try:
-            # Convert history if provided
             framework_messages = message_history.to_framework_messages() if message_history else []
 
-            # Run Pydantic AI
-            result = await self._pydantic_agent.run(
+            # Run with retry and timeout
+            result = await self._run_with_retry(
                 user_prompt=str(input_data),
                 deps=context,
                 message_history=framework_messages,
             )
 
+            elapsed = time.time() - start_time
+
             # Extract data using version-safe helpers
             output_data = self._extract_result_data(result)
             usage_data = self._extract_usage(result)
+            usage_data["elapsed_seconds"] = round(elapsed, 2)
+            usage_data["agent_name"] = self.metadata.name
 
             # Map back to UniversalMessages
             new_messages = []
@@ -125,6 +197,8 @@ class PydanticAIAgent(AgentBase):
             if not new_messages:
                 new_messages = [UniversalMessage.create(role="assistant", content=str(output_data))]
 
+            logger.info(f"Agent '{self.metadata.name}' completed in {elapsed:.2f}s")
+
             return AgentResult(
                 input_data=input_data,
                 output=output_data,
@@ -133,15 +207,26 @@ class PydanticAIAgent(AgentBase):
             )
 
         except Exception as e:
-            logger.error(f"Agent '{self.metadata.name}' failed on input: {str(input_data)[:200]}. Error: {e}")
+            elapsed = time.time() - start_time
+            logger.error(
+                f"Agent '{self.metadata.name}' failed after {self.max_retries} attempts "
+                f"in {elapsed:.2f}s. Final error: {e}"
+            )
             # Return a graceful error result instead of crashing the pipeline
+            error_metadata = {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "agent_name": self.metadata.name,
+                "elapsed_seconds": round(elapsed, 2),
+                "retries_exhausted": True,
+            }
             return AgentResult(
                 input_data=input_data,
-                output=f"Agent {self.metadata.name} encountered an error: {str(e)}",
+                output=f"Agent {self.metadata.name} is temporarily unavailable: {type(e).__name__}",
                 new_messages=[UniversalMessage.create(
                     role="assistant",
                     content=f"Error: {str(e)}",
-                    metadata={"error": True, "agent_name": self.metadata.name},
+                    metadata=error_metadata,
                 )],
-                metadata={"error": str(e)},
+                metadata=error_metadata,
             )

@@ -1,21 +1,26 @@
 """
 NexusOps WebSocket Streaming Service
 ======================================
-Real-time bidirectional communication layer between the frontend and
+Production-grade real-time communication layer between the frontend and
 the agentic orchestration engine.
+
+Features:
+  - Guardrail validation (injection, topic, rate limiting) before agent execution
+  - Circuit breaker: auto-fallback to demo mode after repeated LLM failures
+  - Request timeout: kills stale LLM requests after configurable duration
+  - Output sanitization: strips credentials and sensitive data from responses
+  - Dual-mode: real LLM (Ollama/OpenAI) or intelligent demo mode
 
 Protocol:
   Client → Server (JSON):
     { "type": "chat", "session_id": "...", "message": "Why is payment-service down?" }
-    { "type": "triage_subscribe", "incident_id": "..." }
 
   Server → Client (JSON, streamed):
     { "type": "token",       "content": "Based on",  "done": false }
-    { "type": "token",       "content": " my analysis", "done": false }
     { "type": "tool_call",   "tool": "ask_k8s_agent", "status": "running" }
-    { "type": "tool_result", "tool": "ask_k8s_agent", "result": "..." }
+    { "type": "tool_result", "tool": "ask_k8s_agent", "result": "complete" }
     { "type": "complete",    "content": "...",  "done": true }
-    { "type": "triage_update", "stage": "metrics_analysis", "output": "..." }
+    { "type": "guardrail",   "content": "...",  "reason": "off-topic" }
     { "type": "error",       "message": "..." }
 """
 
@@ -29,11 +34,28 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
+from backend.core.utils.guardrails import (
+    GuardrailConfig,
+    GuardrailResult,
+    RateLimiter,
+    CircuitBreaker,
+    sanitize_output,
+    validate_input,
+)
+
 logger = logging.getLogger("nexusops.websocket")
 
 router = APIRouter()
 
 LLM_MODEL = os.environ.get("LLM_MODEL_NAME", "test")
+
+# ─── Shared Guardrail Instances ──────────────────────────────────────────────
+_guardrail_config = GuardrailConfig()
+_rate_limiter = RateLimiter(
+    max_requests=_guardrail_config.rate_limit_requests,
+    window_seconds=_guardrail_config.rate_limit_window_seconds,
+)
+_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60)
 
 
 class ConnectionManager:
@@ -52,6 +74,7 @@ class ConnectionManager:
 
     def disconnect(self, session_id: str):
         self._connections.pop(session_id, None)
+        _rate_limiter.cleanup_session(session_id)
         logger.info(f"WebSocket disconnected: {session_id} (total: {len(self._connections)})")
 
     async def send_json(self, session_id: str, data: dict):
@@ -86,61 +109,52 @@ def _is_real_llm_configured() -> bool:
 async def _stream_agent_response(websocket: WebSocket, session_id: str, message: str):
     """
     Execute the MasterCoordinator and stream progress updates back to the client.
-    Uses the singleton coordinator from main.py when a real LLM is configured.
-    Falls back to intelligent mock responses in demo mode.
+    Includes guardrail validation, circuit breaker, and output sanitization.
     """
     try:
-        # Signal: thinking started
+        # ─── Step 1: Guardrail Validation ────────────────────────────────
+        guard_result = validate_input(message, session_id, _guardrail_config, _rate_limiter)
+
+        if not guard_result.allowed:
+            logger.info(f"[{session_id}] Guardrail blocked: {guard_result.rejection_reason}")
+            await websocket.send_json({
+                "type": "guardrail",
+                "content": guard_result.rejection_message,
+                "reason": guard_result.rejection_reason,
+                "done": True,
+            })
+            return
+
+        sanitized_message = guard_result.sanitized_input or message
+
+        # ─── Step 2: Signal thinking started ─────────────────────────────
         await websocket.send_json({
             "type": "status",
             "content": "Analyzing your query...",
             "done": False,
         })
 
-        if _is_real_llm_configured():
-            # ── Real LLM Mode ──
-            from backend.api.main import get_coordinator
-            coordinator = get_coordinator()
+        # ─── Step 3: Choose execution path ───────────────────────────────
+        use_real_llm = _is_real_llm_configured() and not _circuit_breaker.is_open
 
-            # Signal tool delegation
-            for tool_name in coordinator.tools.keys():
-                await websocket.send_json({
-                    "type": "tool_call",
-                    "tool": tool_name,
-                    "status": "running",
-                })
-                await asyncio.sleep(0.2)
+        if _circuit_breaker.is_open:
+            logger.warning(f"[{session_id}] Circuit breaker OPEN — using demo mode")
+            await websocket.send_json({
+                "type": "status",
+                "content": "AI service recovering — using cached analysis mode...",
+                "done": False,
+            })
 
-            result = await coordinator.run(input_data=message)
-            response_text = str(result.output)
-
-            # Signal tool completion
-            for tool_name in coordinator.tools.keys():
-                await websocket.send_json({
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "result": "complete",
-                })
+        if use_real_llm:
+            response_text = await _execute_real_llm(websocket, session_id, sanitized_message)
         else:
-            # ── Demo Mode (no real LLM) ──
-            # Simulate realistic tool execution stages
-            demo_tools = ["ask_docs_agent", "ask_k8s_agent", "ask_metrics_agent"]
-            for tool_name in demo_tools:
-                await websocket.send_json({
-                    "type": "tool_call",
-                    "tool": tool_name,
-                    "status": "running",
-                })
-                await asyncio.sleep(0.6)  # Simulate agent execution time
-                await websocket.send_json({
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "result": "complete",
-                })
+            response_text = await _execute_demo_mode(websocket, session_id, sanitized_message)
 
-            response_text = _generate_mock_response(message)
+        # ─── Step 4: Sanitize output ─────────────────────────────────────
+        if _guardrail_config.enable_output_sanitizer:
+            response_text = sanitize_output(response_text)
 
-        # Stream response token-by-token
+        # ─── Step 5: Stream response token-by-token ──────────────────────
         words = response_text.split(" ")
         for i, word in enumerate(words):
             token = word + " "
@@ -149,9 +163,9 @@ async def _stream_agent_response(websocket: WebSocket, session_id: str, message:
                 "content": token,
                 "done": False,
             })
-            await asyncio.sleep(0.03)  # Simulate LLM generation latency
+            await asyncio.sleep(0.03)
 
-        # Signal: complete
+        # ─── Step 6: Signal complete ─────────────────────────────────────
         await websocket.send_json({
             "type": "complete",
             "content": response_text,
@@ -163,8 +177,76 @@ async def _stream_agent_response(websocket: WebSocket, session_id: str, message:
         logger.exception(f"Error streaming response: {e}")
         await websocket.send_json({
             "type": "error",
-            "message": str(e),
+            "message": "An unexpected error occurred. Please try again.",
         })
+
+
+async def _execute_real_llm(websocket: WebSocket, session_id: str, message: str) -> str:
+    """Execute via the singleton MasterCoordinator with circuit breaker tracking."""
+    from backend.api.main import get_coordinator
+
+    try:
+        coordinator = get_coordinator()
+
+        # If coordinator failed to initialize, fall back to demo mode
+        if coordinator is None:
+            logger.warning(f"[{session_id}] Coordinator not available — using demo mode")
+            return await _execute_demo_mode(websocket, session_id, message)
+
+        # Signal tool delegation
+        for tool_name in coordinator.tools.keys():
+            await websocket.send_json({
+                "type": "tool_call",
+                "tool": tool_name,
+                "status": "running",
+            })
+            await asyncio.sleep(0.2)
+
+        result = await coordinator.run(input_data=message)
+        response_text = str(result.output)
+
+        # Check if result indicates error
+        if result.metadata.get("error"):
+            _circuit_breaker.record_failure()
+            logger.warning(f"[{session_id}] Coordinator returned error, circuit breaker notified")
+        else:
+            _circuit_breaker.record_success()
+
+        # Signal tool completion
+        for tool_name in coordinator.tools.keys():
+            await websocket.send_json({
+                "type": "tool_result",
+                "tool": tool_name,
+                "result": "complete",
+            })
+
+        return response_text
+
+    except Exception as e:
+        _circuit_breaker.record_failure()
+        logger.error(f"[{session_id}] Real LLM execution failed: {e}")
+
+        # Fall back to demo mode for this request
+        return await _execute_demo_mode(websocket, session_id, message)
+
+
+async def _execute_demo_mode(websocket: WebSocket, session_id: str, message: str) -> str:
+    """Execute demo mode with simulated tool calls and pre-built responses."""
+    demo_tools = ["ask_docs_agent", "ask_k8s_agent", "ask_metrics_agent"]
+    for tool_name in demo_tools:
+        await websocket.send_json({
+            "type": "tool_call",
+            "tool": tool_name,
+            "status": "running",
+        })
+        await asyncio.sleep(0.6)
+        await websocket.send_json({
+            "type": "tool_result",
+            "tool": tool_name,
+            "result": "complete",
+        })
+
+    return _generate_mock_response(message)
 
 
 def _generate_mock_response(message: str) -> str:

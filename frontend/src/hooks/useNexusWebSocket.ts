@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface WSMessage {
-  type: "connected" | "token" | "tool_call" | "tool_result" | "complete" | "status" | "error" | "pong";
+  type: "connected" | "token" | "tool_call" | "tool_result" | "complete" | "status" | "error" | "guardrail" | "pong";
   content?: string;
   session_id?: string;
   message?: string;
@@ -11,6 +11,7 @@ export interface WSMessage {
   status?: string;
   available_tools?: string[];
   result?: string;
+  reason?: string;
 }
 
 export function useNexusWebSocket(url: string = "ws://localhost:8082/ws/chat") {
@@ -62,9 +63,22 @@ export function useNexusWebSocket(url: string = "ws://localhost:8082/ws/chat") {
           setStreamingText("");
           break;
 
+        case "guardrail":
+          // Guardrail rejection — display as a system response
+          setIsStreaming(false);
+          setActiveTools([]);
+          if (onCompleteRef.current && data.content) {
+            onCompleteRef.current(data.content);
+          }
+          setStreamingText("");
+          break;
+
         case "error":
           setIsStreaming(false);
           setActiveTools([]);
+          if (onCompleteRef.current && data.message) {
+            onCompleteRef.current(`⚠️ **Error:** ${data.message}`);
+          }
           console.error("[NexusOps] Error:", data.message);
           break;
       }

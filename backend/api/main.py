@@ -54,15 +54,25 @@ _coordinator: MasterCoordinator = None
 
 
 def get_coordinator() -> MasterCoordinator:
-    """Return the singleton MasterCoordinator instance."""
+    """
+    Return the singleton MasterCoordinator instance.
+    Returns None if initialization fails (demo mode will be used).
+    """
     global _coordinator
     if _coordinator is None:
-        _coordinator = MasterCoordinator(
-            model_name=LLM_MODEL,
-            qdrant_url=QDRANT_URL,
-            prometheus_url=PROMETHEUS_URL,
-        )
-        logger.info(f"MasterCoordinator initialized with model={LLM_MODEL}, tools={list(_coordinator.tools.keys())}")
+        try:
+            _coordinator = MasterCoordinator(
+                model_name=LLM_MODEL,
+                qdrant_url=QDRANT_URL,
+                prometheus_url=PROMETHEUS_URL,
+            )
+            logger.info(f"MasterCoordinator initialized with model={LLM_MODEL}, tools={list(_coordinator.tools.keys())}")
+        except Exception as e:
+            logger.warning(
+                f"MasterCoordinator initialization failed: {e}. "
+                f"The API will start in demo mode. Fix the LLM configuration and restart."
+            )
+            return None
     return _coordinator
 
 
@@ -73,8 +83,10 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     logger.info("═══ NexusOps API Starting ═══")
 
-    # 1. Initialize the coordinator at startup (fail-fast)
-    get_coordinator()
+    # 1. Initialize the coordinator at startup (graceful — continues in demo mode if it fails)
+    coordinator = get_coordinator()
+    if coordinator is None:
+        logger.warning("═══ NexusOps API starting in DEMO MODE (no LLM configured) ═══")
 
     # 2. Ensure Kafka topics exist (graceful if broker is down)
     try:
@@ -103,9 +115,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NexusOps — AI DevOps Ops Center",
     description="Intelligent infrastructure operations powered by multi-agent AI orchestration.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
+
+# Middleware stack (order matters — outermost first)
+from backend.api.middleware import RequestIdMiddleware, AccessLogMiddleware
+app.add_middleware(AccessLogMiddleware)
+app.add_middleware(RequestIdMiddleware)
 
 # CORS for frontend
 app.add_middleware(
