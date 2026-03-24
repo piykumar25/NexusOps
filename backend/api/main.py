@@ -23,6 +23,7 @@ from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 from backend.core.agents.coordinator import MasterCoordinator
@@ -132,6 +133,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Prometheus metrics endpoint
+Instrumentator().instrument(app).expose(app)
 
 # Register routers
 app.include_router(webhook_router)
