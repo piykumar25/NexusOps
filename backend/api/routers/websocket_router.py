@@ -193,7 +193,7 @@ async def _execute_real_llm(websocket: WebSocket, session_id: str, message: str)
             logger.warning(f"[{session_id}] Coordinator not available — using demo mode")
             return await _execute_demo_mode(websocket, session_id, message)
 
-        # Signal tool delegation
+        # Signal tool delegation (all agents will be called)
         for tool_name in coordinator.tools.keys():
             await websocket.send_json({
                 "type": "tool_call",
@@ -202,8 +202,38 @@ async def _execute_real_llm(websocket: WebSocket, session_id: str, message: str)
             })
             await asyncio.sleep(0.2)
 
-        result = await coordinator.run(input_data=message)
+        # ─── Heartbeat: send "still thinking" every 15s during inference ─────
+        # Large local models (8B+) take 90-180s. Without feedback the user
+        # sees a blank screen and thinks the app crashed.
+        heartbeat_task = asyncio.create_task(
+            _send_heartbeat(websocket, session_id, interval_seconds=15)
+        )
+
+        try:
+            result = await coordinator.run(input_data=message)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
         response_text = str(result.output)
+
+        # ─── Guard: Detect raw Llama tool-call format leaking as text ────────
+        # Some smaller Ollama models (e.g. llama3.2:3b) output their internal
+        # tool-call syntax verbatim instead of executing it. Detect and recover.
+        response_text = _clean_llm_output(response_text, session_id)
+
+        # If the model returned only a raw tool call (now replaced with empty string),
+        # fall through to demo mode so the user gets a real-looking response.
+        if not response_text.strip():
+            logger.warning(
+                f"[{session_id}] Model returned only raw tool-call syntax. "
+                f"Falling back to demo mode. Consider switching to llama3.1 (8B) for better tool support."
+            )
+            _circuit_breaker.record_failure()
+            return await _execute_demo_mode(websocket, session_id, message)
 
         # Check if result indicates error
         if result.metadata.get("error"):
@@ -228,6 +258,84 @@ async def _execute_real_llm(websocket: WebSocket, session_id: str, message: str)
 
         # Fall back to demo mode for this request
         return await _execute_demo_mode(websocket, session_id, message)
+
+
+async def _send_heartbeat(websocket: WebSocket, session_id: str, interval_seconds: int = 15):
+    """
+    Send periodic 'still thinking' status updates while the LLM is processing.
+    Keeps the frontend alive — prevents blank screen during 90-180s local inference.
+    Automatically cancelled when the LLM finishes.
+    """
+    _THINKING_MESSAGES = [
+        "Querying your infrastructure agents...",
+        "Analyzing cluster state and metrics...",
+        "Cross-referencing runbooks and past incidents...",
+        "Synthesizing findings from all agents...",
+        "Almost done — preparing your analysis...",
+    ]
+    elapsed = 0
+    idx = 0
+    while True:
+        await asyncio.sleep(interval_seconds)
+        elapsed += interval_seconds
+        msg = _THINKING_MESSAGES[idx % len(_THINKING_MESSAGES)]
+        idx += 1
+        try:
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_json({
+                    "type": "status",
+                    "content": f"⏳ {msg} ({elapsed}s elapsed)",
+                    "done": False,
+                })
+                logger.debug(f"[{session_id}] Heartbeat sent at {elapsed}s")
+        except Exception:
+            # WebSocket may have closed — heartbeat will be cancelled by parent anyway
+            break
+
+
+def _clean_llm_output(text: str, session_id: str) -> str:
+    """
+    Detect and strip raw Llama 3.x native tool-call syntax that some smaller
+    models emit verbatim instead of executing via pydantic-ai's tool framework.
+
+    Patterns handled:
+      - <|python_tag|>{...}        (Llama 3.2 native format)
+      - [TOOL_CALL] {...}          (some Llama 3.1 variants)
+      - <tool_call>...</tool_call> (generic XML-style)
+    """
+    import re
+
+    # Llama 3.2 python_tag format
+    python_tag_pattern = re.compile(
+        r'<\|python_tag\|>\s*\{.*?\}(?:\s*<\|eom_id\|>)?',
+        re.DOTALL
+    )
+
+    # [TOOL_CALL] JSON format
+    tool_call_bracket_pattern = re.compile(
+        r'\[TOOL_CALL\]\s*\{.*?\}',
+        re.DOTALL
+    )
+
+    # XML-style tool call tags
+    xml_tool_call_pattern = re.compile(
+        r'<tool_call>.*?</tool_call>',
+        re.DOTALL
+    )
+
+    original = text
+    text = python_tag_pattern.sub('', text)
+    text = tool_call_bracket_pattern.sub('', text)
+    text = xml_tool_call_pattern.sub('', text)
+    text = text.strip()
+
+    if text != original.strip():
+        logger.warning(
+            f"[{session_id}] Stripped raw tool-call syntax from LLM output. "
+            f"Recommend using llama3.1 (8B) for reliable tool calling."
+        )
+
+    return text
 
 
 async def _execute_demo_mode(websocket: WebSocket, session_id: str, message: str) -> str:

@@ -37,20 +37,22 @@ uvicorn backend.api.main:app --host 0.0.0.0 --port 8082 --reload
 
 **Best for:** Portfolio demos, frontend development, CI pipelines.
 
-### Ollama Mode (Real AI)
+### Full Ollama Mode (Real AI — Recommended)
 
-Requires Ollama installed with a pulled model.
+Requires Ollama installed with a pulled model. Use **`llama3.1`** (8B) — it has reliable tool-calling support.
+`llama3.2:3b` (3B) may leak raw tool-call JSON into the UI due to model limitations.
 
 ```powershell
 # Install Ollama: https://ollama.ai
 # In a separate terminal:
-ollama pull llama3.2:3b    # 2GB, fast
-# OR
-ollama pull llama3.1       # 4.9GB, smarter
+ollama pull llama3.1       # 4.9GB, best tool-calling reliability
+
+# Activate venv first!
+.\.venv\Scripts\Activate.ps1
 
 # Start backend
 $env:OLLAMA_BASE_URL = "http://localhost:11434/v1"
-$env:LLM_MODEL_NAME = "ollama:llama3.2:3b"
+$env:LLM_MODEL_NAME = "ollama:llama3.1"
 uvicorn backend.api.main:app --host 0.0.0.0 --port 8082 --reload
 ```
 
@@ -90,13 +92,17 @@ docker compose up -d      # Fresh start
 
 ### Service Ports
 
-| Service | Port | Dashboard |
-|---------|------|-----------|
+| Service | Port | Dashboard / Notes |
+|---------|------|---|
 | PostgreSQL | 5432 | — |
 | Redis | 6379 | — |
 | Qdrant | 6333 | http://localhost:6333/dashboard |
 | Kafka | 9093 | — |
 | Zookeeper | 22181 | — |
+| Prometheus | 9090 | http://localhost:9090 |
+| **Grafana** | **3001** | http://localhost:3001 (admin / nexusops_admin) |
+| **Frontend** | **3000** | http://localhost:3000 |
+| **Backend API** | **8082** | http://localhost:8082/docs |
 
 ---
 

@@ -17,6 +17,7 @@ Agent Delegation Map:
 """
 
 import logging
+import os
 from typing import Any, Dict, List
 from pydantic import BaseModel, Field
 from backend.core.agents.pydantic_ai_agent import PydanticAIAgent
@@ -54,19 +55,23 @@ class MasterCoordinator(PydanticAIAgent):
         super().__init__(
             metadata=metadata,
             system_prompt="""You are the Master Coordinator of NexusOps — an AI DevOps Operations Center.
-Your job is to analyze the user's query, determine which specialist agents to consult, and synthesize a comprehensive answer.
+Your job is to analyze the user's query, determine which specialist agents to consult, execute their tools, and then synthesize a comprehensive answer in the final structured output.
 
 Delegation rules:
-- For questions about logs, pods, deployments, or cluster state → delegate to K8sAgent (ask_k8s_agent)
-- For questions about runbooks, troubleshooting guides, or past incidents → delegate to DocsAgent (ask_docs_agent)
-- For questions about metrics, CPU, memory, latency, or error rates → delegate to MetricsAgent (ask_metrics_agent)
-- For complex incidents, consult ALL relevant agents and synthesize their findings.
+- For questions about logs, pods, deployments, or cluster state → execute tool K8sAgent (ask_k8s_agent)
+- For questions about runbooks, troubleshooting guides, or past incidents → execute tool DocsAgent (ask_docs_agent)
+- For questions about metrics, CPU, memory, latency, or error rates → execute tool MetricsAgent (ask_metrics_agent)
+- For complex incidents, consult ALL relevant agents.
 
-If an agent returns an error or is unavailable, acknowledge it and work with the data you have from the other agents.
-Always provide actionable recommendations with your analysis. Cite your sources (which agent provided each piece of data).""",
+CRITICAL INSTRUCTIONS:
+1. You MUST use the provided tool_calls natively. Do NOT output raw JSON mimicking a tool call in your text.
+2. Wait for the tools to return their results (the system will feed them back to you). 
+3. After you have the results, synthesize your final answer and return it using the strictly defined NexusOpsOutput structured output format.
+4. If an agent returns an error or is unavailable, acknowledge it and work with the data you have from the other agents.
+5. Always provide actionable recommendations with your analysis. Cite your sources (which agent provided each piece of data).""",
             output_type=NexusOpsOutput,
             model_name=model_name,
-            timeout_seconds=120.0,  # Coordinator gets extra time since it calls sub-agents
+            timeout_seconds=float(os.environ.get("COORDINATOR_TIMEOUT_SECONDS", "360")),
         )
 
         # Instantiate specialist agents with their own timeouts
@@ -118,6 +123,6 @@ Always provide actionable recommendations with your analysis. Cite your sources 
                 logger.error(f"MetricsAgent delegation failed: {e}")
                 return f"[MetricsAgent unavailable] Unable to query Prometheus: {type(e).__name__}"
 
-        self.add_tool(ask_docs, name="ask_docs_agent", return_to_caller=True)
-        self.add_tool(ask_k8s, name="ask_k8s_agent", return_to_caller=True)
-        self.add_tool(ask_metrics, name="ask_metrics_agent", return_to_caller=True)
+        self.add_tool(ask_docs, name="ask_docs_agent", return_to_caller=False)
+        self.add_tool(ask_k8s, name="ask_k8s_agent", return_to_caller=False)
+        self.add_tool(ask_metrics, name="ask_metrics_agent", return_to_caller=False)

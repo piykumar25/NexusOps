@@ -87,7 +87,7 @@ services:
     image: grafana/grafana:10.4.5
     container_name: nexusops-grafana
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - nexusops-grafana-data:/var/lib/grafana
     environment:

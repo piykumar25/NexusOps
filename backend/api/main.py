@@ -125,10 +125,13 @@ from backend.api.middleware import RequestIdMiddleware, AccessLogMiddleware
 app.add_middleware(AccessLogMiddleware)
 app.add_middleware(RequestIdMiddleware)
 
-# CORS for frontend
+# CORS for frontend — allow both :3000 (normal) and :3001 (when Grafana takes 3000)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Scoped to frontend, not wildcard
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -180,12 +183,14 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health_check():
     coordinator = get_coordinator()
+    agents = list(coordinator.tools.keys()) if coordinator else []
     return {
         "status": "healthy",
         "service": "nexusops-api",
-        "version": "0.2.0",
-        "agents_loaded": list(coordinator.tools.keys()),
+        "version": "0.3.0",
+        "agents_loaded": agents,
         "model": LLM_MODEL,
+        "mode": "real" if coordinator else "demo",
     }
 
 
@@ -193,7 +198,8 @@ async def health_check():
 async def root():
     return {
         "name": "NexusOps — AI DevOps Ops Center",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "docs": "/docs",
         "health": "/health",
+        "metrics": "/metrics",
     }

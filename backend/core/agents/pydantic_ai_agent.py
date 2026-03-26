@@ -23,7 +23,16 @@ from pydantic_ai import Agent, RunContext, models
 from backend.core.memory.message_base import UniversalMessage, MessageHistoryBase
 from backend.core.agents.agent_base import AgentBase, AgentMetadata, AgentResult, ToolConfig
 
+import os
+
 logger = logging.getLogger("nexusops.agent")
+
+# ─── Model-aware defaults ─────────────────────────────────────────────────────
+# Large local models (llama3.1 8B, mistral 7B, etc.) need much more wall-time
+# than API-based models. Defaults here are tuned for local 8B models.
+# Override via env vars: AGENT_TIMEOUT_SECONDS, AGENT_MAX_RETRIES
+_DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT_SECONDS", "180"))  # 3 min per agent
+_DEFAULT_MAX_RETRIES = int(os.environ.get("AGENT_MAX_RETRIES", "1"))      # 1 retry for local LLMs
 
 
 class PydanticAIAgent(AgentBase):
@@ -32,9 +41,9 @@ class PydanticAIAgent(AgentBase):
     """
 
     # Default retry and timeout settings (can be overridden per-agent)
-    DEFAULT_MAX_RETRIES: int = 3
-    DEFAULT_RETRY_BACKOFF: List[float] = [1.0, 2.0, 4.0]  # seconds
-    DEFAULT_TIMEOUT_SECONDS: float = 90.0
+    DEFAULT_MAX_RETRIES: int = _DEFAULT_MAX_RETRIES
+    DEFAULT_RETRY_BACKOFF: List[float] = [2.0, 5.0]   # longer backoffs for 8B models
+    DEFAULT_TIMEOUT_SECONDS: float = _DEFAULT_TIMEOUT
 
     def __init__(
         self,
@@ -52,6 +61,7 @@ class PydanticAIAgent(AgentBase):
         self._pydantic_agent = Agent(
             model=model_name,
             system_prompt=system_prompt,
+            output_type=output_type if output_type is not Any else str,
         )
 
     def add_tool(self, tool: Callable, name: Optional[str] = None, enabled: bool = True, use_cache: bool = False, return_to_caller: bool = True) -> ToolConfig:
@@ -63,11 +73,9 @@ class PydanticAIAgent(AgentBase):
                 raise RuntimeError(f"Tool {config.name} is currently disabled.")
             return await tool(*args, **kwargs) if inspect.iscoroutinefunction(tool) else tool(*args, **kwargs)
 
-        if return_to_caller:
-            self._pydantic_agent.tool(name=config.name)(_tool_wrapper)
-        else:
-            self._pydantic_agent.system_prompt(f"Use output tool {config.name} to return final result.")
-            self._pydantic_agent.tool(name=config.name)(_tool_wrapper)
+        # We simply register the underlying tool. The boolean return_to_caller
+        # is no longer used to hack system_prompts. pydantic-ai handles the tool naturally.
+        self._pydantic_agent.tool(name=config.name)(_tool_wrapper)
 
         return config
 
